@@ -1,0 +1,4 @@
+data.tsv
+outdir/*
+.DS_Store
+.vscode/
