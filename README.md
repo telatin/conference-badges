@@ -7,6 +7,12 @@ Generate conference badges based on a list of attendees and an SVG template.
 A TSV file with a set of columns. For example: **Name**, **Affiliation**.
 See [list.tsv](list.tsv) for an example.
 
+Name | Affiliation
+--- | ---
+Alice | University of Wonderland
+Bob | Institute of Bobology
+
+
 ## Template
 
 The template is an SVG file with placeholders for the attendee name and the conference name.
@@ -18,10 +24,25 @@ This is because we expect to place multiple badges in the same SVG file, so you 
 
 ![example](demo.png)
 
-:warning: Currently the prefix is hardcoded to `PGPXTAG_`.
+:bulb: the default prefix for placeholders is `PXTAG_`.
 
 ## Usage
 
 ```bash
 python namer.py template.svg list.tsv outdir
+```
+
+:information_source: If inkscape is in your PATH or in /Applications, the script will also produce PDF files.
+
+```text
+usage: namer.py [-h] [--tag TAG] template table output
+
+positional arguments:
+  template    SVG template file
+  table       CSV table file
+  output      Output directory
+
+options:
+  -h, --help  show this help message and exit
+  --tag TAG   Tag prefix (default: PXTAG_)
 ```

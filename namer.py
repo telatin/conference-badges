@@ -3,7 +3,7 @@
 Given an SVG template and a table,
 generate a set of SVG files with the table data.
 """
-
+import subprocess
 import argparse
 import math
 import csv
@@ -11,19 +11,20 @@ import os
 import re
 import re
 
-def write_files(templatetext, data, outdir):
+def write_files(templatetext, data, outdir, tag_prefix="PXTAG_"):
     """
     Write SVG files based on template and data records.
     
     Args:
-        templatetext (str): The SVG template text containing PXTAG_XXX[N] tags
+        templatetext (str): The SVG template text containing PREFIX_XXX[N] tags
         data (list): List of dictionaries containing the data records
         outdir (str): Output directory path
+        tag_prefix (str): Prefix used for the tags (default: PXTAG_)
     """
     # First find the number of records per page by analyzing tags
     parts = re.split(r'<[^>]+>', templatetext)
     # Get any tag to check its max number
-    tag_match = re.search(r'PXTAG_[A-Z]+\d+', templatetext)
+    tag_match = re.search(rf'{tag_prefix}[A-Z]+\d+', templatetext)
     if not tag_match:
         raise ValueError("No numbered tags found in template")
     
@@ -54,9 +55,13 @@ def write_files(templatetext, data, outdir):
             
             # Find all tags for this position and replace them
             for key in record.keys():
-                # Replace all instances of PXTAG_KEY{pos} with the record value
-                pattern = rf'PXTAG_{key}{pos}'
+                # Replace all instances of PREFIX_KEY{pos} with the record value
+                pattern = rf'{tag_prefix}{key}{pos}'
                 pagetext = pagetext.replace(pattern, str(record[key]))
+        
+        # Final cleanup: replace any remaining numbered tags with empty string
+        # This catches any tags that might not have corresponding columns in the data
+        pagetext = re.sub(rf'{tag_prefix}[A-Z]+[0-9]+', '', pagetext)
         
         # Write the page to a file
         outfile = os.path.join(outdir, f'page_{page + 1}.svg')
@@ -65,7 +70,7 @@ def write_files(templatetext, data, outdir):
         
     return total_pages
 
-def get_tags(filename):
+def get_tags(filename, prefix='PXTAG_'):
     """ 
     Read a SVG file and return a list of tags and page count.
     Tags are strings in format PXTAG_XXX where XXX is alphabetic.
@@ -80,7 +85,7 @@ def get_tags(filename):
     parts = re.split(r'<[^>]+>', content)
     base_tags = []
     for part in parts:
-        matches = re.findall(r'PXTAG_[A-Z]+', part)
+        matches = re.findall(rf'{prefix}[A-Z]+', part)
         base_tags.extend(matches)
     
     unique_tags = [tag[6:] for tag in set(base_tags)]
@@ -91,7 +96,7 @@ def get_tags(filename):
     first_tag = unique_tags[0]
     numbers = []
     for part in parts:
-        matches = re.findall(rf'PXTAG_{first_tag}(\d+)', part)
+        matches = re.findall(rf'{prefix}{first_tag}(\d+)', part)
         numbers.extend(int(n) for n in matches)
     
     if not numbers:
@@ -103,7 +108,7 @@ def get_tags(filename):
     for tag in unique_tags[1:]:
         numbers = []
         for part in parts:
-            matches = re.findall(rf'PXTAG_{tag}(\d+)', part)
+            matches = re.findall(rf'{prefix}{tag}(\d+)', part)
             numbers.extend(int(n) for n in matches)
         
         if not numbers:
@@ -116,7 +121,7 @@ def get_tags(filename):
     return unique_tags, reference_max, content
     
 
-def readtable(filename):
+def read_table(filename):
     """
     Read a TSV file. The first row is the header, return it as list (header).
     Then return each record in a second list [(x,y,z), (a,b,c), ...]
@@ -145,15 +150,30 @@ if __name__ == '__main__':
     parser.add_argument('template', help='SVG template file')
     parser.add_argument('table', help='CSV table file')
     parser.add_argument('output', help='Output directory')
+    parser.add_argument('--tag', default='PXTAG_', help='Tag prefix (default: PXTAG_)')
     args = parser.parse_args()
 
     # Read the template file
-    tags, pages, template_text = get_tags(args.template)
-    print(tags)
+    print(f"Reading template file {args.template}")
+    try:
+        tags, pages, template_text = get_tags(args.template, args.tag)
+        print(f'Tags found in template {args.template}:')
+        for tag in tags:
+            print(f' -  {tag}')
+    except ValueError as e:
+        print(f'Error: {e}')
+        exit(1)
 
     # Read the table file
-    columns, data = readtable(args.table)
-    print(data)
+    try:
+        columns, data = read_table(args.table)
+        # Print the columns
+        print(f'Columns found in table {args.table} ({len(data)} records):')
+        for col in columns:
+            print(f' -  {col}')
+    except ValueError as e:
+        print(f'Error: {e}')
+        exit(1)
 
     # write
     if not os.path.exists(args.output):
@@ -164,3 +184,25 @@ if __name__ == '__main__':
     
     pages = write_files(template_text, data, args.output)
     print(f'Wrote {pages} pages to {args.output}')
+
+    # Check if inkscape is available as 'inkscape' or '/Applications/Inkscape.app/Contents/MacOS/inkscape', else None
+
+    inkbin = None
+    for path in ['inkscape', '/Applications/Inkscape.app/Contents/MacOS/inkscape']:
+        try:
+            subprocess.run([path, '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            inkbin = path
+            break
+        except FileNotFoundError:
+            continue
+
+    # Convert SVG to PDF
+    if inkbin is not None:
+        svgs = [os.path.join(args.output, f'page_{i}.svg') for i in range(1, pages + 1)]
+        for svg in svgs:
+            pdf = svg.replace('.svg', '.pdf')
+            print(f'Converting {svg} to {pdf}')
+            try:
+                subprocess.run([inkbin, svg, '--export-filename', pdf], stderr=subprocess.DEVNULL)
+            except Exception as e:
+                print(f'Error converting {svg} to PDF: {e}')
