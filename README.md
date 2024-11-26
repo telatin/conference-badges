@@ -1,4 +1,4 @@
-# conference-badges
+# :name_badge: conference-badges
 
 Generate conference badges based on a list of attendees and an SVG template.
 
