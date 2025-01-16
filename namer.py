@@ -1,208 +1,249 @@
 #!/usr/bin/env python3
 """
-Given an SVG template and a table,
-generate a set of SVG files with the table data.
+Conference Badge Generator
+
+Generate conference badges by combining an SVG template with attendee data.
+The script takes a TSV file with attendee information and an SVG template with placeholders,
+generating individual badge pages as both SVG and PDF files.
+
+Usage:
+    python badge_generator.py template.svg attendees.tsv output_dir [--prefix PREFIX] [--force]
 """
-import subprocess
+
 import argparse
-import math
 import csv
+import logging
 import os
 import re
-import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+import subprocess
+from xml.etree import ElementTree as ET
 
-def write_files(templatetext, data, outdir, tag_prefix="PXTAG_"):
-    """
-    Write SVG files based on template and data records.
-    
-    Args:
-        templatetext (str): The SVG template text containing PREFIX_XXX[N] tags
-        data (list): List of dictionaries containing the data records
-        outdir (str): Output directory path
-        tag_prefix (str): Prefix used for the tags (default: PXTAG_)
-    """
-    # First find the number of records per page by analyzing tags
-    parts = re.split(r'<[^>]+>', templatetext)
-    # Get any tag to check its max number
-    tag_match = re.search(rf'{tag_prefix}[A-Z]+\d+', templatetext)
-    if not tag_match:
-        raise ValueError("No numbered tags found in template")
-    
-    # Find all numbers for this tag
-    numbers = []
-    for part in parts:
-        matches = re.findall(rf'{tag_match.group(0)[:-1]}(\d+)', part)
-        numbers.extend(int(n) for n in matches)
-    
-    records_per_page = max(numbers)
-    total_pages = math.ceil(len(data) / records_per_page)
-    
-    # Process each page
-    for page in range(total_pages):
-        pagetext = templatetext
-        start_idx = page * records_per_page
-        
-        # Get records for this page
-        page_records = data[start_idx:start_idx + records_per_page]
-        
-        # Pad with empty records if needed for last page
-        while len(page_records) < records_per_page:
-            page_records.append({key: '' for key in data[0].keys()})
-            
-        # For each record position in the page
-        for pos in range(1, records_per_page + 1):
-            record = page_records[pos - 1]
-            
-            # Find all tags for this position and replace them
-            for key in record.keys():
-                # Replace all instances of PREFIX_KEY{pos} with the record value
-                pattern = rf'{tag_prefix}{key}{pos}'
-                pagetext = pagetext.replace(pattern, str(record[key]))
-        
-        # Final cleanup: replace any remaining numbered tags with empty string
-        # This catches any tags that might not have corresponding columns in the data
-        pagetext = re.sub(rf'{tag_prefix}[A-Z]+[0-9]+', '', pagetext)
-        
-        # Write the page to a file
-        outfile = os.path.join(outdir, f'page_{page + 1}.svg')
-        with open(outfile, 'w') as f:
-            f.write(pagetext)
-        
-    return total_pages
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def get_tags(filename, prefix='PXTAG_'):
-    """ 
-    Read a SVG file and return a list of tags and page count.
-    Tags are strings in format PXTAG_XXX where XXX is alphabetic.
-    Returns the list of unique base tags and the highest number found in the numbered series.
-    Each tag can appear multiple times with the same number, e.g.:
-    PXTAG_NAMSUR1 PXTAG_NAMSUR1 PXTAG_NAMSUR2 PXTAG_NAMSUR2 ... PXTAG_NAMSUR5 PXTAG_NAMSUR5
-    """
-    with open(filename) as f:
-        content = f.read()
+@dataclass
+class Template:
+    """Represents an SVG template with placeholder tags."""
+    content: str
+    tags: Set[str]
+    records_per_page: int
 
-    # Split content by XML tags and only process text outside them
-    parts = re.split(r'<[^>]+>', content)
-    base_tags = []
-    for part in parts:
-        matches = re.findall(rf'{prefix}[A-Z]+', part)
-        base_tags.extend(matches)
-    
-    unique_tags = [tag[6:] for tag in set(base_tags)]
-    if not unique_tags:
-        raise ValueError('No tags found')
+@dataclass
+class AttendeeData:
+    """Represents the attendee data from TSV file."""
+    headers: List[str]
+    records: List[Dict[str, str]]
 
-    # Find highest number for first tag
-    first_tag = unique_tags[0]
-    numbers = []
-    for part in parts:
-        matches = re.findall(rf'{prefix}{first_tag}(\d+)', part)
-        numbers.extend(int(n) for n in matches)
-    
-    if not numbers:
-        raise ValueError(f'No numbered instances found for tag {first_tag}')
-    
-    reference_max = max(numbers)
+class BadgeGenerator:
+    def __init__(self, prefix: str = "PXTAG_"):
+        self.prefix = prefix
+        self._inkscape_path = self._find_inkscape()
 
-    # Verify all tags have the same highest number
-    for tag in unique_tags[1:]:
-        numbers = []
-        for part in parts:
-            matches = re.findall(rf'{prefix}{tag}(\d+)', part)
-            numbers.extend(int(n) for n in matches)
-        
-        if not numbers:
-            raise ValueError(f'No numbered instances found for tag {tag}')
-        
-        tag_max = max(numbers)
-        if tag_max != reference_max:
-            raise ValueError(f'Tag {tag} has max number {tag_max}, expected {reference_max}')
-
-    return unique_tags, reference_max, content
-    
-
-def read_table(filename):
-    """
-    Read a TSV file. The first row is the header, return it as list (header).
-    Then return each record in a second list [(x,y,z), (a,b,c), ...]
-
-    """
-
-    with open(filename) as f:
-        reader = csv.reader(f, delimiter='\t')
-        header = next(reader)
-        # remove empty columns
-        header = [col for col in header if col]
-
-
-        data = [row for row in reader]
-        # keep only the columns that have a header
-        data = [[cell for cell in row if cell] for row in data]
-
-        # make data a list of dictionaries, using the header as keys
-        data = [dict(zip(header, row)) for row in data]
-
-
-
-    return header, data
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('template', help='SVG template file')
-    parser.add_argument('table', help='CSV table file')
-    parser.add_argument('output', help='Output directory')
-    parser.add_argument('--tag', default='PXTAG_', help='Tag prefix (default: PXTAG_)')
-    args = parser.parse_args()
-
-    # Read the template file
-    print(f"Reading template file {args.template}")
-    try:
-        tags, pages, template_text = get_tags(args.template, args.tag)
-        print(f'Tags found in template {args.template}:')
-        for tag in tags:
-            print(f' -  {tag}')
-    except ValueError as e:
-        print(f'Error: {e}')
-        exit(1)
-
-    # Read the table file
-    try:
-        columns, data = read_table(args.table)
-        # Print the columns
-        print(f'Columns found in table {args.table} ({len(data)} records):')
-        for col in columns:
-            print(f' -  {col}')
-    except ValueError as e:
-        print(f'Error: {e}')
-        exit(1)
-
-    # write
-    if not os.path.exists(args.output):
-        try:   
-            os.makedirs(args.output)
-        except OSError:
-            print ("Creation of the directory %s failed" % args.output)
-    
-    pages = write_files(template_text, data, args.output)
-    print(f'Wrote {pages} pages to {args.output}')
-
-    # Check if inkscape is available as 'inkscape' or '/Applications/Inkscape.app/Contents/MacOS/inkscape', else None
-
-    inkbin = None
-    for path in ['inkscape', '/Applications/Inkscape.app/Contents/MacOS/inkscape']:
-        try:
-            subprocess.run([path, '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            inkbin = path
-            break
-        except FileNotFoundError:
-            continue
-
-    # Convert SVG to PDF
-    if inkbin is not None:
-        svgs = [os.path.join(args.output, f'page_{i}.svg') for i in range(1, pages + 1)]
-        for svg in svgs:
-            pdf = svg.replace('.svg', '.pdf')
-            print(f'Converting {svg} to {pdf}')
+    def _find_inkscape(self) -> Optional[str]:
+        """Find Inkscape executable path."""
+        paths = ['inkscape', '/Applications/Inkscape.app/Contents/MacOS/inkscape']
+        for path in paths:
             try:
-                subprocess.run([inkbin, svg, '--export-filename', pdf], stderr=subprocess.DEVNULL)
-            except Exception as e:
-                print(f'Error converting {svg} to PDF: {e}')
+                subprocess.run([path, '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                return path
+            except FileNotFoundError:
+                continue
+        return None
+
+    def read_template(self, template_path: Path) -> Template:
+        """
+        Read and parse SVG template file.
+        
+        Args:
+            template_path: Path to SVG template file
+            
+        Returns:
+            Template object containing content and parsed tags
+        """
+        try:
+            with open(template_path) as f:
+                content = f.read()
+    
+            # Validate SVG
+            try:
+                ET.fromstring(content)
+            except ET.ParseError as e:
+                raise ValueError(f"Invalid SVG template: {e}")
+    
+            # Find all unique base tags and their highest number
+            tag_pattern = rf'{self.prefix}([A-Z]+)(\d+)'
+            matches = re.findall(tag_pattern, content)
+            
+            if not matches:
+                raise ValueError(f"No tags found with prefix {self.prefix}")
+            
+            # Get unique tag types (NAME, AFFILIATION, etc.)
+            tags = {match[0] for match in matches}
+            
+            # Find highest number used for any tag
+            max_number = max(int(match[1]) for match in matches)
+            
+            # Verify that for each tag type, we have a continuous sequence from 1 to max_number
+            for tag in tags:
+                numbers_found = {int(num) for _, num in matches if _ == tag}
+                expected_numbers = set(range(1, max_number + 1))
+                if not numbers_found.issubset(expected_numbers):
+                    raise ValueError(f"Tag {tag} is missing some numbers in sequence 1 to {max_number}")
+            
+            return Template(
+                content=content,
+                tags=tags,
+                records_per_page=max_number
+            )
+    
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Template file not found: {template_path}")
+    def read_attendees(self, data_path: Path) -> AttendeeData:
+        """
+        Read attendee data from TSV file.
+        
+        Args:
+            data_path: Path to TSV file
+            
+        Returns:
+            AttendeeData object containing headers and records
+        """
+        try:
+            with open(data_path) as f:
+                reader = csv.reader(f, delimiter='\t')
+                headers = next(reader)
+                
+                if not headers:
+                    raise ValueError("Empty header row in data file")
+                
+                # Remove empty columns and whitespace
+                headers = [h.strip() for h in headers if h.strip()]
+                
+                records = []
+                for row_num, row in enumerate(reader, start=2):
+                    # Skip empty rows
+                    if not any(cell.strip() for cell in row):
+                        continue
+                        
+                    # Clean and validate row data
+                    row = [cell.strip() for cell in row[:len(headers)]]
+                    if len(row) != len(headers):
+                        logger.warning(
+                            f"Row {row_num} has {len(row)} columns, expected {len(headers)}. "
+                            "Row will be padded with empty strings."
+                        )
+                        row.extend([''] * (len(headers) - len(row)))
+                    
+                    records.append(dict(zip(headers, row)))
+                
+                return AttendeeData(headers=headers, records=records)
+
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Data file not found: {data_path}")
+
+    def generate_badges(self, template: Template, data: AttendeeData, output_dir: Path) -> int:
+        """
+        Generate badge pages from template and data.
+        """
+        # Validate that template tags match data headers
+        template_tags = {tag.upper() for tag in template.tags}
+        data_headers = {h.upper() for h in data.headers}
+        
+        missing_tags = data_headers - template_tags
+        if missing_tags:
+            logger.warning(f"Data columns missing from template: {', '.join(missing_tags)}")
+        
+        # Calculate total pages needed
+        total_pages = (len(data.records) + template.records_per_page - 1) // template.records_per_page
+        
+        # Generate each page
+        for page in range(total_pages):
+            page_content = template.content
+            start_idx = page * template.records_per_page
+            page_records = data.records[start_idx:start_idx + template.records_per_page]
+            
+            # Pad with empty records if needed
+            while len(page_records) < template.records_per_page:
+                page_records.append({key: '' for key in data.headers})
+            
+            # Replace tags for each record position
+            for pos in range(1, template.records_per_page + 1):
+                record = page_records[pos - 1]
+                for key in data.headers:
+                    tag = f"{self.prefix}{key}{pos}"
+                    # Use re.sub instead of string replace to get all occurrences
+                    page_content = re.sub(re.escape(tag), str(record.get(key, '')), page_content)
+            
+            # Write SVG file
+            output_path = output_dir / f'page_{page + 1}.svg'
+            with open(output_path, 'w') as f:
+                f.write(page_content)
+            
+            # Convert to PDF if Inkscape is available
+            if self._inkscape_path:
+                pdf_path = output_path.with_suffix('.pdf')
+                try:
+                    subprocess.run(
+                        [self._inkscape_path, str(output_path), '--export-filename', str(pdf_path)],
+                        stderr=subprocess.DEVNULL
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to convert {output_path} to PDF: {e}")
+        
+        return total_pages
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate conference badges from SVG template and TSV data")
+    parser.add_argument('template', help='SVG template file')
+    parser.add_argument('data', help='TSV data file')
+    parser.add_argument('output', help='Output directory')
+    parser.add_argument('--prefix', default='PXTAG_', help='Tag prefix (default: PXTAG_)')
+    parser.add_argument('--force', action='store_true', help='Overwrite existing output directory')
+    
+    args = parser.parse_args()
+    
+    # Convert paths
+    template_path = Path(args.template)
+    data_path = Path(args.data)
+    output_dir = Path(args.output)
+    
+    # Validate output directory
+    if output_dir.exists() and not args.force:
+        logger.error(f"Output directory exists: {output_dir}. Use --force to overwrite.")
+        return 1
+        
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        generator = BadgeGenerator(prefix=args.prefix)
+        
+        # Read template
+        logger.info(f"Reading template: {template_path}")
+        template = generator.read_template(template_path)
+        logger.info(f"Found tags: {', '.join(template.tags)}")
+        
+        # Read data
+        logger.info(f"Reading data: {data_path}")
+        data = generator.read_attendees(data_path)
+        logger.info(f"Found {len(data.records)} records with columns: {', '.join(data.headers)}")
+        
+        # Generate badges
+        logger.info(f"Generating badges in: {output_dir}")
+        pages = generator.generate_badges(template, data, output_dir)
+        logger.info(f"Generated {pages} pages")
+        
+        return 0
+        
+    except (ValueError, FileNotFoundError) as e:
+        logger.error(str(e))
+        return 1
+
+if __name__ == '__main__':
+    exit(main())
