@@ -160,11 +160,18 @@ class BadgeGenerator:
         if missing_tags:
             logger.warning(f"Data columns missing from template: {', '.join(missing_tags)}")
         
+        missing_required = template_tags - data_headers
+        if missing_required:
+            raise ValueError(
+                f"Required template tags missing from data: {', '.join(missing_required)}. "
+                f"Data must contain columns for all tags used in template."
+            )
         # Calculate total pages needed
         total_pages = (len(data.records) + template.records_per_page - 1) // template.records_per_page
         
         # Generate each page
         for page in range(total_pages):
+            logger.info(f"\tAdding page {page+1}/{total_pages}...")
             page_content = template.content
             start_idx = page * template.records_per_page
             page_records = data.records[start_idx:start_idx + template.records_per_page]
